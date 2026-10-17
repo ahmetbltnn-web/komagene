@@ -1,6 +1,6 @@
 {
-  "name": "komagene-isletme-paneli",
-  "version": "1.0.0",
+  "name": "komagene-gelir-gider",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "engines": {

@@ -1,211 +1,112 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent, ReactNode } from "react";
+import type { FormEvent } from "react";
 import {
-  ArrowDownToLine,
+  ArrowDownLeft,
+  ArrowLeftRight,
   ArrowRight,
+  ArrowUpRight,
   BarChart3,
-  Bell,
   Check,
   ChevronDown,
-  CircleHelp,
-  ClipboardList,
-  CreditCard,
   Eye,
   EyeOff,
   LayoutDashboard,
   LogOut,
   Menu,
-  Package,
-  Plus,
   Settings,
   ShieldCheck,
-  ShoppingBag,
   Store,
-  Users,
+  Tags,
   Wallet,
   X,
 } from "lucide-react";
 import { api, ApiError } from "./api";
-import type { AppState, Employee, Page, Product } from "./types";
-import { localDate } from "./types";
+import { Button, Modal, PeriodPicker } from "./components";
+import { CategoryForm, EntryForm } from "./forms";
 import {
+  Categories,
   Dashboard,
-  Employees,
-  Expenses,
-  Orders,
-  Products,
+  Entries,
   Reports,
   SettingsPage,
-  Stock,
-} from "./views";
-import {
-  EmployeeForm,
-  ExpenseForm,
-  OrderForm,
-  ProductForm,
-  StockForm,
-} from "./forms";
+} from "./finance";
+import type {
+  Category,
+  Entry,
+  EntryType,
+  Mutation,
+  Page,
+  Period,
+  Report,
+  State,
+} from "./types";
+import { initialPeriod, range } from "./types";
 
 type Auth = { initialized: boolean; user: { name: string } | null };
-export type Mutation = (
-  path: string,
-  body: unknown,
-  method?: string,
-) => Promise<boolean>;
-type ModalKind = "order" | "product" | "stock" | "expense" | "employee";
-const nav = [
+const menu = [
   { key: "dashboard", label: "Genel bakış", icon: LayoutDashboard },
-  { key: "orders", label: "Siparişler", icon: ShoppingBag },
-  { key: "products", label: "Ürünler & menü", icon: ClipboardList },
-  { key: "stock", label: "Stok yönetimi", icon: Package },
-  { key: "expenses", label: "Giderler", icon: Wallet },
-  { key: "employees", label: "Personel", icon: Users },
+  { key: "income", label: "Gelirler", icon: ArrowDownLeft },
+  { key: "expense", label: "Giderler", icon: ArrowUpRight },
+  { key: "entries", label: "Tüm hareketler", icon: ArrowLeftRight },
   { key: "reports", label: "Raporlar", icon: BarChart3 },
+  { key: "categories", label: "Kategoriler", icon: Tags },
 ] as const;
-const pageLabels: Record<Page, string> = {
+const labels: Record<Page, string> = {
   dashboard: "Genel bakış",
-  orders: "Siparişler",
-  products: "Ürünler & menü",
-  stock: "Stok yönetimi",
-  expenses: "Giderler",
-  employees: "Personel",
+  income: "Gelirler",
+  expense: "Giderler",
+  entries: "Tüm hareketler",
   reports: "Raporlar",
-  settings: "İşletme ayarları",
+  categories: "Kategoriler",
+  settings: "Ayarlar & yedekleme",
 };
-const pageFromHash = (): Page => {
-  const hash = window.location.hash.slice(1);
-  return Object.hasOwn(pageLabels, hash) ? (hash as Page) : "dashboard";
-};
-
-export function Brand() {
+const hashPage = (): Page =>
+  Object.hasOwn(labels, location.hash.slice(1))
+    ? (location.hash.slice(1) as Page)
+    : "dashboard";
+function Brand() {
   return (
-    <div className="sidebar-brand">
-      <span className="brand-icon">
+    <div className="brand">
+      <span className="brand-mark">
         k<span>·</span>
       </span>
       <span>
-        <span className="brand-word">komagene</span>
-        <span className="brand-caption">İŞLETME PANELİ</span>
+        <strong>komagene</strong>
+        <small>GELİR & GİDER PANELİ</small>
       </span>
     </div>
   );
 }
-
-export function Modal({
-  title,
-  subtitle,
-  children,
-  close,
-  wide = false,
-}: {
-  title: string;
-  subtitle?: string;
-  children: ReactNode;
-  close: () => void;
-  wide?: boolean;
-}) {
-  const dialog = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const previous = document.activeElement as HTMLElement | null;
-    const oldOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    const focusable = () =>
-      [
-        ...(dialog.current?.querySelectorAll<HTMLElement>(
-          'button, input, select, textarea, a[href], [tabindex="0"]',
-        ) || []),
-      ].filter(
-        (el) => !el.hasAttribute("disabled") && el.getClientRects().length > 0,
-      );
-    focusable()[0]?.focus();
-    const keydown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        close();
-      }
-      if (event.key === "Tab") {
-        const elements = focusable();
-        const first = elements[0];
-        const last = elements.at(-1);
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last?.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first?.focus();
-        }
-      }
-    };
-    document.addEventListener("keydown", keydown);
-    return () => {
-      document.body.style.overflow = oldOverflow;
-      document.removeEventListener("keydown", keydown);
-      previous?.focus();
-    };
-  }, [close]);
-  return (
-    <div
-      className="modal-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <div
-        ref={dialog}
-        className={"modal" + (wide ? " wide" : "")}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="modal-title"
-      >
-        <div className="modal-header">
-          <div>
-            <h2 id="modal-title">{title}</h2>
-            {subtitle && <p>{subtitle}</p>}
-          </div>
-          <button
-            className="icon-button modal-close"
-            onClick={close}
-            aria-label="Pencereyi kapat"
-          >
-            <X size={20} />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function AuthPage({
+function Login({
   auth,
-  onSuccess,
+  refresh,
 }: {
   auth: Auth;
-  onSuccess: () => Promise<void>;
+  refresh: () => Promise<void>;
 }) {
+  const setup = !auth.initialized;
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [show, setShow] = useState(false);
-  const setup = !auth.initialized;
+  const [visible, setVisible] = useState(false);
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setBusy(true);
     setError("");
-    const form = new FormData(event.currentTarget);
+    setBusy(true);
+    const f = new FormData(event.currentTarget);
     try {
       await api(
         setup ? "/setup" : "/login",
         "POST",
         setup
           ? {
-              name: form.get("name"),
-              branchName: form.get("branchName"),
-              password: form.get("password"),
-              withDemo: form.get("withDemo") === "on",
+              name: f.get("name"),
+              branchName: f.get("branchName"),
+              password: f.get("password"),
+              withDemo: f.get("demo") === "on",
             }
-          : { password: form.get("password") },
+          : { password: f.get("password") },
       );
-      await onSuccess();
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Bağlantı kurulamadı.");
     } finally {
@@ -213,378 +114,384 @@ function AuthPage({
     }
   }
   return (
-    <div className="auth-shell">
+    <div className="auth-layout">
       <section className="auth-story">
         <Brand />
-        <div className="auth-illustration">
-          <span className="setup-tag">
-            <span /> Şubenin kontrolü sende
+        <div className="auth-intro">
+          <span className="auth-tag">
+            <span />
+            Finansal kontrol, tek bir yerde.
           </span>
           <h1>
-            İşini büyüt.
+            İşletmenin hesabı,
             <br />
-            <span>Her detayı yönet.</span>
+            <em>artık çok daha net.</em>
           </h1>
           <p>
-            Tezgahtan kasaya, stoktan ekibine.
+            Ne kazandığını, nereye harcadığını ve ay sonunda
             <br />
-            İşletmenin tüm akışı tek bir yerde.
+            nerede durduğunu kolayca gör.
           </p>
-          <div className="auth-feature-grid">
+          <div className="auth-preview">
             <div>
-              <ShoppingBag size={24} />
-              <strong>Siparişler</strong>
-              <span>Her sipariş kontrol altında</span>
+              <span className="metric-icon green">
+                <ArrowDownLeft size={22} />
+              </span>
+              <small>GELİRLERİN</small>
+              <strong>Her tahsilat kayıtlı.</strong>
             </div>
             <div>
-              <Package size={24} />
-              <strong>Stok takibi</strong>
-              <span>İhtiyacını önceden gör</span>
+              <span className="metric-icon orange">
+                <ArrowUpRight size={22} />
+              </span>
+              <small>GİDERLERİN</small>
+              <strong>Her harcama görünür.</strong>
             </div>
             <div>
-              <BarChart3 size={24} />
-              <strong>Raporlar</strong>
-              <span>Rakamlarla karar ver</span>
-            </div>
-            <div>
-              <Users size={24} />
-              <strong>Ekip yönetimi</strong>
-              <span>Birlikte daha düzenli</span>
+              <span className="metric-icon blue">
+                <BarChart3 size={22} />
+              </span>
+              <small>RAPORLARIN</small>
+              <strong>Aydan yıla, tüm tablo.</strong>
             </div>
           </div>
         </div>
-        <span className="auth-note">
-          İşletmen için hazırlanmış bağımsız yönetim uygulaması.
-        </span>
+        <p className="auth-foot">
+          Tek şubeye özel · Türk lirası · Kalıcı kayıt
+        </p>
       </section>
       <section className="auth-panel">
         <div className="auth-card">
-          <span className="auth-symbol">
-            <Store size={28} />
+          <span className="login-symbol">
+            <Wallet size={27} />
           </span>
-          <p className="eyebrow">KOMAGENE İŞLETME PANELİ</p>
-          <h2>{setup ? "Yeni bir başlangıç." : "Tekrar hoş geldin."}</h2>
-          <p className="page-description">
+          <p className="eyebrow">SADECE İŞLETMENİN FİNANSI</p>
+          <h2>{setup ? "Hesabını birlikte açalım." : "Tekrar hoş geldin."}</h2>
+          <p className="description">
             {setup
-              ? "Şubeni tanımla, yönetici hesabını oluştur ve başlayalım."
-              : "İşletmeni yönetmeye devam etmek için giriş yap."}
+              ? "İşletmeni tanımla, gelir ve giderlerini takip etmeye başla."
+              : "Gelir ve giderlerinin güncel durumuna göz at."}
           </p>
           <form className="form-stack" onSubmit={submit}>
             {setup && (
               <>
-                <label className="form-field">
+                <label className="field">
                   Adın soyadın
                   <input
                     name="name"
                     required
-                    maxLength={80}
-                    placeholder="Ad Soyad"
+                    maxLength={100}
                     autoComplete="name"
+                    placeholder="Ad Soyad"
                   />
                 </label>
-                <label className="form-field">
-                  Şube adı
+                <label className="field">
+                  İşletme / şube adı
                   <input
                     name="branchName"
                     required
                     maxLength={100}
-                    placeholder="Örn. Kadıköy Şubesi"
+                    placeholder="Örn. Komagene Merkez Şubesi"
                   />
                 </label>
               </>
             )}
-            <label className="form-field">
+            <label className="field">
               Yönetici şifresi
-              <div className="password-field">
+              <div className="password-input">
                 <input
                   name="password"
-                  type={show ? "text" : "password"}
-                  required
+                  type={visible ? "text" : "password"}
                   minLength={setup ? 10 : undefined}
                   maxLength={200}
+                  required
                   autoComplete={setup ? "new-password" : "current-password"}
                   placeholder={setup ? "En az 10 karakter" : "Şifreni gir"}
                 />
                 <button
-                  className="toggle-password"
                   type="button"
-                  aria-label={show ? "Şifreyi gizle" : "Şifreyi göster"}
-                  onClick={() => setShow(!show)}
+                  className="icon-button"
+                  aria-label="Şifre görünürlüğünü değiştir"
+                  onClick={() => setVisible(!visible)}
                 >
-                  {show ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {visible ? <EyeOff size={18} /> : <Eye size={18} />}
                 </button>
               </div>
             </label>
             {setup && (
-              <label className="checkbox-field">
-                <input type="checkbox" name="withDemo" defaultChecked />
+              <label className="checkbox">
+                <input type="checkbox" name="demo" />
                 <span>
-                  Örnek işletme verileri ekle
+                  Örnek gelir-gider verileri ekle
                   <small>
-                    Özellikleri denemek için örnek sipariş, ürün ve personel
-                    kayıtları oluşturur. Gerçek kayıtlar için işareti kaldır.
+                    Denemek için bu ve önceki yıldan örnek kayıtlar ekler.
+                    Gerçek kullanım için boş bırak.
                   </small>
                 </span>
               </label>
             )}
             {error && (
-              <div className="error-banner" role="alert">
+              <div className="error-message" role="alert">
                 {error}
               </div>
             )}
-            <button className="btn primary full" disabled={busy}>
+            <Button variant="primary full" type="submit" disabled={busy}>
               {busy
                 ? "Hazırlanıyor…"
                 : setup
-                  ? "İşletmemi oluştur"
-                  : "Panele giriş yap"}
-              <ArrowRight size={18} />
-            </button>
+                  ? "Panelimi oluştur"
+                  : "Giriş yap"}
+              <ArrowRight size={17} />
+            </Button>
           </form>
-          <p className="auth-security">
-            <ShieldCheck size={16} /> Şifre korumalı erişim · Kalıcı veri kaydı
+          <p className="auth-secure">
+            <ShieldCheck size={15} />
+            Şifre korumalı erişim · Verilerin seninle
           </p>
         </div>
       </section>
     </div>
   );
 }
-
 export default function App() {
-  const [auth, setAuth] = useState<Auth | null>(null);
-  const [state, setState] = useState<AppState | null>(null);
-  const [page, setPage] = useState<Page>(pageFromHash);
+  const [auth, setAuth] = useState<Auth | null>(null),
+    [state, setState] = useState<State | null>(null);
+  const [page, setPage] = useState<Page>(hashPage);
+  const [period, setPeriod] = useState<Period>(initialPeriod);
   const [mobile, setMobile] = useState(false);
-  const [modal, setModal] = useState<ModalKind | null>(null);
-  const [editProduct, setEditProduct] = useState<Product | undefined>();
-  const [editEmployee, setEditEmployee] = useState<Employee | undefined>();
-  const [stockProduct, setStockProduct] = useState<string | undefined>();
-  const [error, setError] = useState("");
-  const [toast, setToast] = useState<{
-    message: string;
-    error?: boolean;
-  } | null>(null);
-  const [mutating, setMutating] = useState(false);
-  const mutationLock = useRef(false);
-  const stateVersion = useRef(0);
-  const closeModal = useCallback(() => setModal(null), []);
-  const notify = (message: string, isError = false) =>
-    setToast({ message, error: isError });
+  const [report, setReport] = useState<Report | null>(null);
+  const [reportError, setReportError] = useState("");
+  const [loadingError, setLoadingError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<{ text: string; error: boolean } | null>(
+    null,
+  );
+  const [modal, setModal] = useState<
+    | { kind: "entry"; type: EntryType; entry?: Entry }
+    | { kind: "category"; type: EntryType; category?: Category }
+    | null
+  >(null);
+  const lock = useRef(false),
+    version = useRef(0);
+  const close = useCallback(() => setModal(null), []);
   const refresh = useCallback(async () => {
-    const nextAuth = await api<Auth>("/auth");
-    setAuth(nextAuth);
-    if (nextAuth.user) setState(await api<AppState>("/state"));
+    const a = await api<Auth>("/auth");
+    setAuth(a);
+    if (a.user) setState(await api<State>("/state"));
     else setState(null);
-    setError("");
+    setLoadingError("");
   }, []);
   useEffect(() => {
-    refresh().catch((err) => setError(err.message));
+    refresh().catch((e) => setLoadingError(e.message));
   }, [refresh]);
   useEffect(() => {
-    const update = () => {
-      setPage(pageFromHash());
+    const change = () => {
+      setPage(hashPage());
       setMobile(false);
     };
-    window.addEventListener("hashchange", update);
-    return () => window.removeEventListener("hashchange", update);
+    addEventListener("hashchange", change);
+    return () => removeEventListener("hashchange", change);
   }, []);
   useEffect(() => {
-    document.title = `${pageLabels[page]} · Komagene`;
+    document.title = `${labels[page]} · Komagene Finans`;
   }, [page]);
   useEffect(() => {
     if (!toast) return;
-    const timer = setTimeout(() => setToast(null), 5000);
-    return () => clearTimeout(timer);
+    const t = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(t);
   }, [toast]);
+  const from = range(period).from,
+    to = range(period).to;
+  useEffect(() => {
+    if (!state) return;
+    let active = true;
+    setReportError("");
+    if (from > to) {
+      setReportError("Başlangıç tarihi bitiş tarihinden sonra olamaz.");
+      return;
+    }
+    api<Report>(`/reports?from=${from}&to=${to}`)
+      .then((value) => {
+        if (active) setReport(value);
+      })
+      .catch((e) => {
+        if (active) setReportError(e.message);
+      });
+    return () => {
+      active = false;
+    };
+  }, [from, to, state]);
   useEffect(() => {
     if (!auth?.user) return;
-    const poll = () => {
-      if (document.visibilityState !== "visible" || mutationLock.current)
-        return;
-      const version = stateVersion.current;
-      api<AppState>("/state")
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "visible" || lock.current) return;
+      const before = version.current;
+      api<State>("/state")
         .then((next) => {
-          if (!mutationLock.current && version === stateVersion.current)
-            setState(next);
+          if (!lock.current && before === version.current) setState(next);
         })
-        .catch((err) => {
-          if (err instanceof ApiError && err.status === 401) {
+        .catch((e) => {
+          if (e instanceof ApiError && e.status === 401) {
             setAuth({ initialized: true, user: null });
             setState(null);
+            setModal(null);
           }
         });
-    };
-    const interval = setInterval(poll, 30000);
-    return () => clearInterval(interval);
+    }, 60000);
+    return () => clearInterval(timer);
   }, [auth?.user]);
   const mutate: Mutation = async (path, body, method = "POST") => {
-    if (mutationLock.current) return false;
-    mutationLock.current = true;
-    stateVersion.current++;
-    setMutating(true);
+    if (lock.current) return false;
+    lock.current = true;
+    version.current++;
+    setBusy(true);
     try {
       await api(path, method, body);
       try {
-        setState(await api<AppState>("/state"));
+        setState(await api<State>("/state"));
       } catch {
-        notify(
-          "Kayıt alındı. Güncel verileri görmek için sayfayı yenileyin.",
-          true,
-        );
+        setToast({
+          text: "İşlem kaydedildi. Güncel veriler için sayfayı yenileyin.",
+          error: true,
+        });
         return true;
       }
-      notify("İşlem başarıyla kaydedildi.");
+      setToast({ text: "İşlem başarıyla kaydedildi.", error: false });
       return true;
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) {
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 401) {
         setAuth({ initialized: true, user: null });
         setState(null);
         setModal(null);
       }
-      notify(err instanceof Error ? err.message : "İşlem tamamlanamadı.", true);
+      setToast({
+        text: e instanceof Error ? e.message : "İşlem tamamlanamadı.",
+        error: true,
+      });
       return false;
     } finally {
-      mutationLock.current = false;
-      setMutating(false);
+      lock.current = false;
+      setBusy(false);
     }
   };
   const navigate = (next: Page) => {
-    window.location.hash = next;
+    location.hash = next;
     setPage(next);
     setMobile(false);
+    window.scrollTo({ top: 0, behavior: "instant" });
   };
-  const openModal = (kind: ModalKind) => {
-    setEditProduct(undefined);
-    setEditEmployee(undefined);
-    setStockProduct(undefined);
-    setModal(kind);
-  };
-  const onEditProduct = (product: Product) => {
-    setEditProduct(product);
-    setModal("product");
-  };
-  const onEditEmployee = (employee: Employee) => {
-    setEditEmployee(employee);
-    setModal("employee");
-  };
-  const onStock = (productId?: string) => {
-    setStockProduct(productId);
-    setModal("stock");
-  };
+  const open = (type: EntryType, entry?: Entry) =>
+    setModal({ kind: "entry", type, entry });
   async function logout() {
     try {
       await api("/logout", "POST");
       setAuth({ initialized: true, user: null });
       setState(null);
-    } catch (err) {
-      notify(err instanceof Error ? err.message : "Çıkış yapılamadı.", true);
+      setModal(null);
+    } catch (e) {
+      setToast({
+        text: e instanceof Error ? e.message : "Çıkış yapılamadı.",
+        error: true,
+      });
     }
   }
-  if (error && !state)
+  if (loadingError && !state)
     return (
       <div className="loading-screen">
-        <Store size={40} />
-        <h2>Sunucuya ulaşılamadı</h2>
-        <p>{error}</p>
-        <button
-          className="btn primary"
-          onClick={() => refresh().catch((err) => setError(err.message))}
+        <Wallet size={34} />
+        <h2>Panele bağlanılamadı</h2>
+        <p>{loadingError}</p>
+        <Button
+          variant="primary"
+          onClick={() => refresh().catch((e) => setLoadingError(e.message))}
         >
           Yeniden dene
-        </button>
+        </Button>
       </div>
     );
   if (!auth)
     return (
       <div className="loading-screen">
         <span className="spinner" />
-        <p>İşletme paneli hazırlanıyor…</p>
+        <p>Finans paneli hazırlanıyor…</p>
       </div>
     );
-  if (!auth.user) return <AuthPage auth={auth} onSuccess={refresh} />;
+  if (!auth.user) return <Login auth={auth} refresh={refresh} />;
   if (!state)
     return (
       <div className="loading-screen">
         <span className="spinner" />
-        <p>İşletme verileri yükleniyor…</p>
+        <p>Kayıtlar yükleniyor…</p>
       </div>
     );
-  const lowStock = state.products.filter(
-    (p) => p.active && p.stock <= p.minStock,
-  );
-  const activeOrders = state.orders.filter(
-    (o) => o.status === "Hazırlanıyor" || o.status === "Hazır",
-  ).length;
+  const showPeriod = !["settings", "categories"].includes(page);
+  const pending = state.entries.filter((e) => e.status === "pending").length;
   return (
-    <div className="app-shell">
+    <div className="app-layout">
       {mobile && (
         <button
-          className="mobile-backdrop"
+          className="mobile-overlay"
           aria-label="Menüyü kapat"
           onClick={() => setMobile(false)}
         />
       )}
-      <aside className={"sidebar" + (mobile ? " open" : "")}>
+      <aside className={`sidebar ${mobile ? "open" : ""}`}>
         <Brand />
-        <div className="branch-switch">
-          <span className="branch-icon">
-            <Store size={18} />
-          </span>
+        <div className="business">
           <span>
-            <strong>{state.settings.branchName}</strong>
-            <small>Tek şube yönetimi</small>
+            <Store size={19} />
           </span>
+          <div>
+            <strong>{state.settings.branchName}</strong>
+            <small>İşletme hesabı · TRY</small>
+          </div>
         </div>
-        <p className="nav-section">İŞLETME YÖNETİMİ</p>
+        <p className="nav-label">FİNANS YÖNETİMİ</p>
         <nav aria-label="Ana menü">
-          {nav.map((item) => (
+          {menu.map((item) => (
             <a
-              href={"#" + item.key}
               key={item.key}
-              className={"nav-item" + (page === item.key ? " active" : "")}
+              className={`nav-link ${page === item.key ? "active" : ""}`}
+              href={"#" + item.key}
               aria-current={page === item.key ? "page" : undefined}
               onClick={() => navigate(item.key)}
             >
-              <item.icon size={20} className="nav-icon" />
+              <item.icon size={20} />
               <span>{item.label}</span>
-              {item.key === "orders" && activeOrders > 0 && (
-                <span className="nav-badge">{activeOrders}</span>
-              )}
-              {item.key === "stock" && lowStock.length > 0 && (
-                <span className="nav-badge muted">{lowStock.length}</span>
+              {item.key === "entries" && pending > 0 && (
+                <small aria-hidden="true">{pending}</small>
               )}
             </a>
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="sidebar-tip">
-            <span>
-              <CircleHelp size={20} />
-            </span>
-            <strong>Her şey bir arada.</strong>
-            <p>İşletmenin günlük akışını tek panelden yönet.</p>
-            <button className="link-button" onClick={() => navigate("reports")}>
+          <div className="sidebar-note">
+            <BarChart3 size={25} />
+            <strong>Her rakamın bir hikâyesi var.</strong>
+            <p>Aylık ve yıllık raporlarınla işletmenin yönünü gör.</p>
+            <button onClick={() => navigate("reports")}>
               Raporları incele <ArrowRight size={14} />
             </button>
           </div>
           <a
-            className={"nav-item" + (page === "settings" ? " active" : "")}
+            className={`nav-link ${page === "settings" ? "active" : ""}`}
             href="#settings"
             onClick={() => navigate("settings")}
           >
-            <Settings size={20} />
-            <span>Ayarlar</span>
+            <Settings size={19} />
+            <span>Ayarlar & yedekleme</span>
           </a>
-          <button className="nav-item" onClick={logout}>
-            <LogOut size={20} />
+          <button className="nav-link" onClick={logout}>
+            <LogOut size={19} />
             <span>Güvenli çıkış</span>
           </button>
-          <div className="sidebar-status">
-            <span /> Sistem çalışıyor <span className="version">v1.0</span>
+          <div className="sidebar-version">
+            <span />
+            Gelir & Gider Paneli <small>v2.0</small>
           </div>
         </div>
       </aside>
-      <div className="main-shell">
+      <div className="main-layout">
         <header className="topbar">
           <div className="breadcrumb">
             <button
@@ -592,39 +499,25 @@ export default function App() {
               onClick={() => setMobile(true)}
               aria-label="Menüyü aç"
             >
-              <Menu size={22} />
+              <Menu size={21} />
             </button>
-            <Store size={17} />
             <span>İşletmem</span>
-            <span className="breadcrumb-slash">/</span>
-            <strong>{pageLabels[page]}</strong>
+            <i>/</i>
+            <strong>{labels[page]}</strong>
           </div>
-          <div className="topbar-actions">
-            <span className="topbar-date">
-              {new Date().toLocaleDateString("tr-TR", {
-                day: "numeric",
-                month: "long",
-                year: "numeric",
-                timeZone: "Europe/Istanbul",
-              })}
+          <div className="topbar-right">
+            <span className="private-badge">
+              <ShieldCheck size={15} />
+              İşletmene özel
             </span>
-            <button
-              className="icon-button notification-button"
-              onClick={() => navigate("stock")}
-              aria-label={`${lowStock.length} ürün stok uyarısı`}
-            >
-              <Bell size={20} />
-              {lowStock.length > 0 && <i />}
-            </button>
-            <div className="topbar-divider" />
-            <button
-              className="user-button"
-              onClick={() => navigate("settings")}
-            >
+            <span className="topbar-divider" />
+            <button className="profile" onClick={() => navigate("settings")}>
               <span className="avatar">
                 {state.settings.ownerName
+                  .split(" ")
+                  .map((n) => n[0])
                   .slice(0, 2)
-                  .toLocaleUpperCase("tr-TR")}
+                  .join("")}
               </span>
               <span>
                 <strong>{state.settings.ownerName}</strong>
@@ -634,213 +527,130 @@ export default function App() {
             </button>
           </div>
         </header>
-        <main className="page-content" id="main-content">
-          {page === "dashboard" && (
+        <main className="content" id="main-content">
+          {state.settings.demoData && (
+            <div className="demo-banner">
+              <span>ÖRNEK VERİ</span>Bu işletme örnek kayıtlar içeriyor.
+              Raporlar bu kayıtları da kapsar.
+            </div>
+          )}
+          {showPeriod && (
+            <PeriodPicker
+              period={period}
+              change={(value) => {
+                setReport(null);
+                setPeriod(value);
+              }}
+              state={state}
+            />
+          )}
+          <div className="print-heading">
+            <h1>{state.settings.branchName} · Finans raporu</h1>
+            <p>
+              {from} / {to} · Türk lirası
+            </p>
+          </div>
+          {reportError && showPeriod && (
+            <div className="error-message" role="alert">
+              {reportError}
+            </div>
+          )}
+          {showPeriod && !report && !reportError && (
+            <div className="report-loading">
+              <span className="spinner" />
+              Dönem verileri hazırlanıyor…
+            </div>
+          )}
+          {report && page === "dashboard" && (
             <Dashboard
               state={state}
+              report={report}
+              period={period}
+              open={open}
               navigate={navigate}
-              openOrder={() => openModal("order")}
-              onStock={onStock}
             />
           )}
-          {page === "orders" && (
-            <Orders
+          {report && ["income", "expense", "entries"].includes(page) && (
+            <Entries
+              key={page}
+              state={state}
+              report={report}
+              page={page as "income" | "expense" | "entries"}
+              open={open}
+              mutate={mutate}
+              busy={busy}
+            />
+          )}
+          {report && page === "reports" && (
+            <Reports state={state} report={report} period={period} />
+          )}{" "}
+          {page === "categories" && (
+            <Categories
               state={state}
               mutate={mutate}
-              busy={mutating}
-              open={() => openModal("order")}
+              busy={busy}
+              edit={(type, category) =>
+                setModal({ kind: "category", type, category })
+              }
             />
-          )}
-          {page === "products" && (
-            <Products
-              state={state}
-              open={() => openModal("product")}
-              edit={onEditProduct}
-            />
-          )}
-          {page === "stock" && <Stock state={state} open={onStock} />}
-          {page === "expenses" && (
-            <Expenses
-              state={state}
-              mutate={mutate}
-              busy={mutating}
-              open={() => openModal("expense")}
-            />
-          )}
-          {page === "employees" && (
-            <Employees
-              state={state}
-              edit={onEditEmployee}
-              open={() => openModal("employee")}
-            />
-          )}
-          {page === "reports" && <Reports state={state} />}
+          )}{" "}
           {page === "settings" && (
-            <SettingsPage state={state} mutate={mutate} busy={mutating} />
+            <SettingsPage state={state} mutate={mutate} busy={busy} />
           )}
           <footer className="page-footer">
-            <span>Komagene · İşletme Paneli</span>
-            <span>Veriler şubene özel, kontrol sende.</span>
+            <span>Komagene · Gelir & Gider Paneli</span>
+            <span>Rakamlar net, kontrol sende.</span>
           </footer>
         </main>
       </div>
-      {modal === "order" && (
+      {modal?.kind === "entry" && (
         <Modal
-          title="Yeni sipariş"
-          subtitle="Ürünleri seç, siparişi mutfağa ilet."
-          close={closeModal}
-          wide
+          title={
+            modal.entry
+              ? "Kaydı düzenle"
+              : modal.type === "income"
+                ? "Gelir ekle"
+                : "Gider ekle"
+          }
+          description="İşletmenin finansal hareketini kayıt altına al."
+          close={close}
         >
-          <OrderForm
+          <EntryForm
             state={state}
+            entry={modal.entry}
+            type={modal.type}
             mutate={mutate}
-            busy={mutating}
-            close={closeModal}
+            busy={busy}
+            close={close}
           />
         </Modal>
       )}
-      {modal === "product" && (
+      {modal?.kind === "category" && (
         <Modal
-          title={editProduct ? "Ürünü düzenle" : "Yeni ürün"}
-          subtitle="Menünü ve satış fiyatlarını yönet."
-          close={closeModal}
+          title={modal.category ? "Kategoriyi düzenle" : "Yeni kategori"}
+          close={close}
         >
-          <ProductForm
-            product={editProduct}
+          <CategoryForm
+            category={modal.category}
+            type={modal.type}
             mutate={mutate}
-            busy={mutating}
-            close={closeModal}
-          />
-        </Modal>
-      )}
-      {modal === "stock" && (
-        <Modal
-          title="Stok hareketi ekle"
-          subtitle="Giriş ve sayım düzeltmelerini kayıt altına al."
-          close={closeModal}
-        >
-          <StockForm
-            state={state}
-            productId={stockProduct}
-            mutate={mutate}
-            busy={mutating}
-            close={closeModal}
-          />
-        </Modal>
-      )}
-      {modal === "expense" && (
-        <Modal
-          title="Gider ekle"
-          subtitle="İşletme harcamalarını takip et."
-          close={closeModal}
-        >
-          <ExpenseForm
-            mutate={mutate}
-            busy={mutating}
-            close={closeModal}
-            date={localDate()}
-          />
-        </Modal>
-      )}
-      {modal === "employee" && (
-        <Modal
-          title={editEmployee ? "Personeli düzenle" : "Personel ekle"}
-          close={closeModal}
-        >
-          <EmployeeForm
-            employee={editEmployee}
-            mutate={mutate}
-            busy={mutating}
-            close={closeModal}
+            busy={busy}
+            close={close}
           />
         </Modal>
       )}
       {toast && (
         <div
-          className={"toast" + (toast.error ? " error" : "")}
+          className={`toast ${toast.error ? "error" : ""}`}
           role={toast.error ? "alert" : "status"}
         >
-          <span className="toast-icon">
-            {toast.error ? <X size={18} /> : <Check size={18} />}
-          </span>
-          {toast.message}
-          <button
-            className="icon-button"
-            aria-label="Bildirimi kapat"
-            onClick={() => setToast(null)}
-          >
+          {toast.error ? <X size={19} /> : <Check size={19} />}
+          <span>{toast.text}</span>
+          <button aria-label="Bildirimi kapat" onClick={() => setToast(null)}>
             <X size={16} />
           </button>
         </div>
       )}
     </div>
   );
-}
-
-export function PageHeading({
-  eyebrow,
-  title,
-  description,
-  children,
-}: {
-  eyebrow?: string;
-  title: string;
-  description: string;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="page-heading">
-      <div>
-        {eyebrow && <p className="eyebrow">{eyebrow}</p>}
-        <h1>{title}</h1>
-        <p className="page-description">{description}</p>
-      </div>
-      <div className="heading-actions">{children}</div>
-    </div>
-  );
-}
-export function Empty({
-  title,
-  message,
-  children,
-}: {
-  title: string;
-  message: string;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="empty-state">
-      <span className="empty-icon">
-        <ShoppingBag size={28} />
-      </span>
-      <h3>{title}</h3>
-      <p>{message}</p>
-      {children}
-    </div>
-  );
-}
-export function AddButton({
-  onClick,
-  children,
-}: {
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button className="btn primary" onClick={onClick}>
-      <Plus size={18} />
-      {children}
-    </button>
-  );
-}
-export function ExportButton() {
-  return (
-    <a href="/api/export" className="btn secondary" download>
-      <ArrowDownToLine size={17} />
-      Verileri indir
-    </a>
-  );
-}
-export function PaymentIcon() {
-  return <CreditCard size={16} />;
 }

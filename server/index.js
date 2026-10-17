@@ -15,7 +15,7 @@ server.once("error", (error) => {
 });
 server.listen(port, host, () =>
   console.log(
-    `Komagene yönetim uygulaması hazır: http://${host}:${server.address().port}`,
+    `Komagene gelir-gider paneli hazır: http://${host}:${server.address().port}`,
   ),
 );
 server.requestTimeout = 30_000;

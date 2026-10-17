@@ -1,741 +1,399 @@
+import { test } from "node:test";
 import assert from "node:assert/strict";
-import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import { randomBytes, randomUUID } from "node:crypto";
 import { createApp } from "../server/app.js";
-
-const PASSWORD = "guvenli-parola-2026";
-
-async function fixture(t, { initialize = true } = {}) {
-  const directory = await mkdtemp(join(tmpdir(), "komagene-test-"));
-  const dbPath = join(directory, "test.sqlite");
-  let app;
-  let server;
-  let baseUrl;
+const password = randomBytes(20).toString("hex");
+async function fixture(t, options = {}) {
+  const dir = await mkdtemp(join(tmpdir(), "finance-api-"));
+  const dbPath = join(dir, "finance.sqlite");
+  let app = createApp({ dbPath });
+  let server = app.listen(0, "127.0.0.1");
+  await new Promise((r) => server.once("listening", r));
   let cookie = "";
-
-  async function stop() {
-    if (server) {
-      const current = server;
-      server = undefined;
-      await new Promise((resolve, reject) => {
-        current.close((error) => (error ? reject(error) : resolve()));
-        current.closeAllConnections();
-      });
-    }
-    if (app) {
-      await app.locals.close();
-      app = undefined;
-    }
-  }
-
-  async function start() {
-    app = createApp({ dbPath });
-    server = app.listen(0, "127.0.0.1");
-    await once(server, "listening");
-    baseUrl = `http://127.0.0.1:${server.address().port}`;
-    cookie = "";
-  }
-
-  async function request(
-    path,
-    { method = "GET", body, authenticated = true, headers = {} } = {},
-  ) {
-    const response = await fetch(`${baseUrl}${path}`, {
+  let base = `http://127.0.0.1:${server.address().port}`;
+  async function request(path, method = "GET", body, headers = {}) {
+    const response = await fetch(base + "/api" + path, {
       method,
       headers: {
-        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
-        ...(authenticated && cookie ? { Cookie: cookie } : {}),
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+        ...(cookie ? { cookie } : {}),
         ...headers,
       },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
-    const setCookies = response.headers.getSetCookie();
-    if (setCookies.length && authenticated) {
-      cookie = setCookies.map((value) => value.split(";", 1)[0]).join("; ");
-    }
-    const text = await response.text();
-    let data;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = text;
-    }
+    const next = response.headers.get("set-cookie");
+    if (next) cookie = next.split(";")[0];
     return {
       status: response.status,
-      ok: response.ok,
-      data,
+      body: await response.json(),
       headers: response.headers,
     };
   }
-
-  async function setup(extra = {}) {
-    return request("/api/setup", {
-      method: "POST",
-      body: {
-        name: "Ahmet",
-        password: PASSWORD,
-        branchName: "Merkez Şube",
-        withDemo: false,
-        ...extra,
-      },
-    });
-  }
-
-  async function state() {
-    const result = await request("/api/state");
-    assert.equal(result.status, 200, JSON.stringify(result.data));
-    return result.data;
-  }
-
-  async function product(extra = {}) {
-    const existingIds = new Set(
-      (await state()).products.map((item) => item.id),
-    );
-    const result = await request("/api/products", {
-      method: "POST",
-      body: {
-        name: "Dürüm",
-        category: "Yiyecek",
-        price: 90,
-        cost: 35,
-        stock: 10,
-        minStock: 3,
-        unit: "adet",
-        ...extra,
-      },
-    });
-    assert.ok(result.ok, JSON.stringify(result.data));
-    return (await state()).products.find((item) => !existingIds.has(item.id));
-  }
-
   t.after(async () => {
-    await stop();
-    await rm(directory, { recursive: true, force: true });
+    await new Promise((r) => server.close(r));
+    app.locals.close();
+    await rm(dir, { recursive: true, force: true });
   });
-  await start();
-  const client = {
+  if (options.setup !== false) {
+    assert.equal(
+      (
+        await request("/setup", "POST", {
+          name: "Test Yönetici",
+          branchName: "Test Finans",
+          password,
+          withDemo: options.demo || false,
+        })
+      ).status,
+      201,
+    );
+  }
+  return {
     request,
-    setup,
-    state,
-    product,
-    stop,
-    start,
-    get origin() {
-      return baseUrl;
+    unauth: () => {
+      cookie = "";
+    },
+    async state() {
+      return (await request("/state")).body;
+    },
+    async reopen() {
+      await new Promise((r) => server.close(r));
+      app.locals.close();
+      app = createApp({ dbPath });
+      server = app.listen(0, "127.0.0.1");
+      await new Promise((r) => server.once("listening", r));
+      base = `http://127.0.0.1:${server.address().port}`;
     },
   };
-  if (initialize) {
-    const result = await setup();
-    assert.ok(result.ok, JSON.stringify(result.data));
-  }
-  return client;
 }
-
-function expectRejected(result) {
-  assert.ok(
-    result.status >= 400 && result.status < 500,
-    JSON.stringify(result),
-  );
-  assert.equal(typeof result.data?.error, "string");
-}
-
-function orderBody(productId, quantity, extra = {}) {
-  return {
-    customer: "Ayşe",
-    channel: "Şube",
-    payment: "Kart",
-    items: [{ productId, quantity }],
-    ...extra,
+async function entry(f, type = "income", overrides = {}) {
+  const s = await f.state();
+  const body = {
+    type,
+    categoryId: s.categories.find((c) => c.type === type).id,
+    amount: 100.25,
+    date: "2026-10-17",
+    account: "Nakit",
+    status: "paid",
+    description: "Test finans kaydı",
+    counterparty: "",
+    reference: "",
+    notes: "",
+    ...overrides,
   };
+  return f.request("/entries", "POST", body);
 }
 
-test("initial setup, private state, session login and logout", async (t) => {
-  const client = await fixture(t, { initialize: false });
-  const health = await client.request("/api/health", { authenticated: false });
-  assert.equal(health.status, 200);
-  const initialAuth = await client.request("/api/auth");
-  assert.equal(initialAuth.status, 200);
-  assert.equal(initialAuth.data.initialized, false);
-  assert.equal(initialAuth.data.user, null);
-  assert.equal((await client.request("/api/state")).status, 401);
-
-  expectRejected(await client.setup({ password: "short" }));
-  const setup = await client.setup();
-  assert.ok(setup.ok, JSON.stringify(setup.data));
-  const cookie = setup.headers.get("set-cookie");
-  assert.match(cookie, /HttpOnly/i);
-  assert.match(cookie, /SameSite=/i);
-  const auth = await client.request("/api/auth");
-  assert.equal(auth.data.initialized, true);
-  assert.equal(auth.data.user.name, "Ahmet");
-  const state = await client.state();
-  for (const key of [
-    "products",
-    "orders",
-    "expenses",
-    "employees",
-    "movements",
-  ]) {
-    assert.ok(Array.isArray(state[key]), `${key} should be an array`);
-    assert.equal(state[key].length, 0, `empty setup should not seed ${key}`);
-  }
-  assert.ok(!JSON.stringify(state).includes(PASSWORD));
-  assert.equal((await client.setup()).status, 409);
-  assert.ok((await client.request("/api/logout", { method: "POST" })).ok);
-  assert.equal((await client.request("/api/state")).status, 401);
-  expectRejected(
-    await client.request("/api/login", {
-      method: "POST",
-      body: { password: "wrong" },
-    }),
-  );
-  assert.equal((await client.request("/api/state")).status, 401);
-  assert.ok(
-    (
-      await client.request("/api/login", {
-        method: "POST",
-        body: { password: PASSWORD },
-      })
-    ).ok,
-  );
-  assert.equal((await client.request("/api/auth")).data.user.name, "Ahmet");
-});
-
-test("concurrent setup creates only one owner", async (t) => {
-  const client = await fixture(t, { initialize: false });
-  const results = await Promise.all([
-    client.setup({ name: "Birinci" }),
-    client.setup({ name: "İkinci" }),
-  ]);
-  assert.equal(results.filter((result) => result.ok).length, 1);
-  assert.equal(results.filter((result) => result.status === 409).length, 1);
-  assert.equal((await client.request("/api/auth")).data.initialized, true);
-});
-
-test("foreign origins cannot initialize, sign in or mutate business data", async (t) => {
-  const client = await fixture(t, { initialize: false });
-  const headers = { Origin: "https://attacker.invalid" };
+test("first setup is private, one-time, and requires a strong password", async (t) => {
+  const f = await fixture(t, { setup: false });
+  assert.equal((await f.request("/state")).status, 401);
+  assert.equal((await f.request("/auth")).body.initialized, false);
   assert.equal(
     (
-      await client.request("/api/setup", {
-        method: "POST",
-        headers,
-        body: {
-          name: "Attacker",
-          password: PASSWORD,
-          branchName: "Merkez",
-          withDemo: false,
-        },
+      await f.request("/setup", "POST", {
+        name: "Test",
+        branchName: "Şube",
+        password: "short",
       })
     ).status,
-    403,
+    400,
   );
-  assert.equal((await client.request("/api/auth")).data.initialized, false);
-  assert.ok((await client.setup()).ok);
   assert.equal(
     (
-      await client.request("/api/login", {
-        method: "POST",
-        headers,
-        body: { password: PASSWORD },
+      await f.request("/setup", "POST", {
+        name: "Test",
+        branchName: "Şube",
+        password,
       })
     ).status,
-    403,
+    201,
   );
-  const product = await client.product();
   assert.equal(
     (
-      await client.request("/api/stock", {
-        method: "POST",
-        headers,
-        body: { productId: product.id, quantity: 99, reason: "İzinsiz" },
+      await f.request("/setup", "POST", {
+        name: "Test",
+        branchName: "Şube",
+        password,
       })
     ).status,
+    409,
+  );
+  assert.equal((await f.request("/state")).body.entries.length, 0);
+  f.unauth();
+  assert.equal((await f.request("/export")).status, 401);
+});
+test("foreign origins are rejected and normal login/logout works", async (t) => {
+  const f = await fixture(t);
+  assert.equal(
+    (await f.request("/logout", "POST", {}, { origin: "https://evil.example" }))
+      .status,
     403,
   );
-  assert.equal((await client.state()).products[0].stock, 10);
-  const sameOrigin = await client.request("/api/stock", {
-    method: "POST",
-    headers: { Origin: client.origin },
-    body: { productId: product.id, quantity: 1, reason: "Sayım" },
-  });
-  assert.ok(sameOrigin.ok, JSON.stringify(sameOrigin.data));
-});
-
-test("products preserve decimal prices, reject excess precision and require stock adjustments", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({
-    price: 12.35,
-    cost: 3.46,
-    stock: 4.125,
-  });
-  assert.equal(product.price, 12.35);
-  assert.equal(product.cost, 3.46);
-  assert.equal(product.stock, 4.125);
-  const update = await client.request(`/api/products/${product.id}`, {
-    method: "PATCH",
-    body: { name: "Mega Dürüm", price: 15.5, stock: 500 },
-  });
-  // An API can reject the stock field or ignore it; neither may change stock.
-  assert.ok(update.ok || (update.status >= 400 && update.status < 500));
-  assert.equal((await client.state()).products[0].stock, 4.125);
-  assert.ok(
-    (
-      await client.request(`/api/products/${product.id}`, {
-        method: "PATCH",
-        body: { name: "Mega Dürüm", price: 15.5, active: false },
-      })
-    ).ok,
-  );
-  const updated = (await client.state()).products[0];
-  assert.equal(updated.name, "Mega Dürüm");
-  assert.equal(updated.price, 15.5);
-  assert.equal(updated.active, false);
-  expectRejected(
-    await client.request("/api/orders", {
-      method: "POST",
-      body: orderBody(product.id, 1),
-    }),
-  );
-  for (const body of [
-    { price: -1 },
-    { cost: -1 },
-    { stock: -1 },
-    { price: "90" },
-    { name: "" },
-    { price: 12.345 },
-    { cost: 3.456 },
-  ]) {
-    expectRejected(
-      await client.request("/api/products", {
-        method: "POST",
-        body: {
-          name: "Geçersiz",
-          category: "Yiyecek",
-          price: 90,
-          cost: 35,
-          stock: 1,
-          minStock: 1,
-          unit: "adet",
-          ...body,
-        },
-      }),
-    );
-  }
-  assert.equal((await client.state()).products.length, 1);
-});
-
-test("stock adjustments are recorded and cannot make stock negative", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({ stock: 2 });
-  assert.ok(
-    (
-      await client.request("/api/stock", {
-        method: "POST",
-        body: { productId: product.id, quantity: 1.25, reason: "Mal kabul" },
-      })
-    ).ok,
-  );
-  assert.ok(
-    (
-      await client.request("/api/stock", {
-        method: "POST",
-        body: { productId: product.id, quantity: -0.25, reason: "Fire" },
-      })
-    ).ok,
-  );
-  const state = await client.state();
-  assert.equal(state.products[0].stock, 3);
-  assert.ok(state.movements.length >= 2);
-  for (const quantity of [-4, 0, "5", null]) {
-    expectRejected(
-      await client.request("/api/stock", {
-        method: "POST",
-        body: { productId: product.id, quantity, reason: "Geçersiz" },
-      }),
-    );
-  }
-  assert.equal((await client.state()).products[0].stock, 3);
-});
-
-test("orders calculate prices on the server and consume aggregated stock", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({ price: 12.35, cost: 3.25, stock: 5 });
-  const injectedPrice = await client.request("/api/orders", {
-    method: "POST",
-    body: orderBody(product.id, 1, {
-      total: 0.01,
-      items: [
-        { productId: product.id, quantity: 1, unitPrice: 0.01 },
-        { productId: product.id, quantity: 2, unitPrice: 0.01 },
-      ],
-    }),
-  });
-  expectRejected(injectedPrice);
-  expectRejected(
-    await client.request("/api/orders", {
-      method: "POST",
-      body: orderBody(product.id, 1, {
-        items: [{ productId: product.id, quantity: 1, unitPrice: 0.01 }],
-      }),
-    }),
-  );
-  assert.equal((await client.state()).products[0].stock, 5);
-  const result = await client.request("/api/orders", {
-    method: "POST",
-    body: orderBody(product.id, 1, {
-      items: [
-        { productId: product.id, quantity: 1 },
-        { productId: product.id, quantity: 2 },
-      ],
-    }),
-  });
-  assert.ok(result.ok, JSON.stringify(result.data));
-  const state = await client.state();
-  assert.equal(state.products[0].stock, 2);
-  assert.equal(state.orders.length, 1);
-  assert.equal(state.orders[0].total, 37.05);
-  assert.equal(state.orders[0].status, "Hazırlanıyor");
+  await f.request("/logout", "POST");
+  assert.equal((await f.request("/state")).status, 401);
   assert.equal(
-    state.orders[0].items.reduce((sum, item) => sum + item.quantity, 0),
+    (await f.request("/login", "POST", { password: "wrong" })).status,
+    401,
+  );
+  assert.equal((await f.request("/login", "POST", { password })).status, 200);
+  assert.equal((await f.request("/auth")).body.user.name, "Test Yönetici");
+});
+test("entry CRUD stores exact cents, validates dates and category type", async (t) => {
+  const f = await fixture(t);
+  const saved = await entry(f);
+  assert.equal(saved.status, 201);
+  assert.equal((await f.state()).entries[0].amount, 100.25);
+  assert.equal((await entry(f, "income", { amount: 0.001 })).status, 400);
+  assert.equal((await entry(f, "income", { amount: -1 })).status, 400);
+  assert.equal((await entry(f, "income", { date: "2026-02-30" })).status, 400);
+  assert.equal((await entry(f, "income", { account: "unknown" })).status, 400);
+  assert.equal(
+    (
+      await entry(f, "income", {
+        categoryId: (await f.state()).categories.find(
+          (c) => c.type === "expense",
+        ).id,
+      })
+    ).status,
+    400,
+  );
+  assert.equal((await entry(f, "income", { unexpected: true })).status, 400);
+  assert.equal(
+    (
+      await f.request("/entries/" + saved.body.id, "PATCH", {
+        amount: 450.12,
+        status: "pending",
+      })
+    ).status,
+    200,
+  );
+  assert.equal((await f.state()).entries[0].status, "pending");
+  assert.equal(
+    (await f.request("/entries/" + saved.body.id, "DELETE")).status,
+    200,
+  );
+  assert.equal((await f.state()).entries.length, 0);
+  assert.equal(
+    (await f.request("/entries/" + saved.body.id, "PATCH", { amount: 1 }))
+      .status,
+    404,
+  );
+});
+test("reports distinguish pending amounts and sum decimal amounts exactly", async (t) => {
+  const f = await fixture(t);
+  await entry(f, "income", { amount: 0.1 });
+  await entry(f, "income", { amount: 0.2 });
+  await entry(f, "expense", { amount: 0.12 });
+  await entry(f, "income", { amount: 900, status: "pending" });
+  await entry(f, "expense", { amount: 700, status: "pending" });
+  const r = await f.request("/reports?from=2026-10-01&to=2026-10-31");
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body.summary, {
+    income: 0.3,
+    expense: 0.12,
+    balance: 0.18,
+    pendingIncome: 900,
+    pendingExpense: 700,
+    count: 5,
+    paidCount: 3,
+  });
+  assert.equal(r.body.months[0].income, 0.3);
+  assert.equal(r.body.accounts.find((a) => a.name === "Nakit").balance, 0.18);
+  assert.equal(
+    r.body.categories.reduce((s, c) => s + c.count, 0),
     3,
   );
-  for (const item of state.orders[0].items) assert.equal(item.unitPrice, 12.35);
-  assert.ok(
-    (
-      await client.request(`/api/products/${product.id}`, {
-        method: "PATCH",
-        body: { name: "Yeni Ürün Adı", price: 50, cost: 20 },
-      })
-    ).ok,
-  );
-  const historicalOrder = (await client.state()).orders[0];
-  assert.equal(historicalOrder.total, 37.05);
-  for (const item of historicalOrder.items) {
-    assert.equal(item.unitPrice, 12.35);
-    assert.equal(item.unitCost, 3.25);
-    assert.equal(item.name, "Dürüm");
-  }
 });
-
-test("invalid orders do not partially consume stock or create orders", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({ stock: 4 });
-  const other = await client.product({ name: "Ayran", stock: 1 });
-  const invalidItems = [
-    [],
-    [{ productId: product.id, quantity: 0 }],
-    [{ productId: product.id, quantity: -1 }],
-    [{ productId: product.id, quantity: 1.5 }],
-    [{ productId: product.id, quantity: "1" }],
-    [{ productId: "missing", quantity: 1 }],
-    [
-      { productId: product.id, quantity: 2 },
-      { productId: product.id, quantity: 3 },
-    ],
-    [
-      { productId: product.id, quantity: 1 },
-      { productId: other.id, quantity: 2 },
-    ],
-  ];
-  for (const items of invalidItems) {
-    expectRejected(
-      await client.request("/api/orders", {
-        method: "POST",
-        body: orderBody(product.id, 1, { items }),
-      }),
-    );
-  }
-  const state = await client.state();
-  assert.equal(state.orders.length, 0);
-  assert.equal(state.products.find((item) => item.id === product.id).stock, 4);
-  assert.equal(state.products.find((item) => item.id === other.id).stock, 1);
+test("reports honor inclusive ranges, prior months, leap years and yearly boundaries", async (t) => {
+  const f = await fixture(t);
+  for (const [date, amount] of [
+    ["2024-02-29", 10],
+    ["2025-12-31", 20],
+    ["2026-01-01", 30],
+    ["2026-10-31", 40],
+    ["2026-11-01", 50],
+  ])
+    await entry(f, "income", { date, amount });
+  const month = (await f.request("/reports?from=2026-10-01&to=2026-10-31"))
+    .body;
+  assert.equal(month.summary.income, 40);
+  assert.equal(month.previous.from, "2026-09-01");
+  assert.equal(month.previous.to, "2026-09-30");
+  const leap = (await f.request("/reports?from=2024-03-01&to=2024-03-31")).body;
+  assert.equal(leap.previous.to, "2024-02-29");
+  assert.equal(leap.previous.summary.income, 10);
+  const year = (await f.request("/reports?from=2026-01-01&to=2026-12-31")).body;
+  assert.equal(year.summary.income, 120);
+  assert.equal(year.previous.summary.income, 20);
+  assert.equal(year.years.length, 3);
+  assert.equal(
+    (await f.request("/reports?from=2026-12-31&to=2026-01-01")).status,
+    400,
+  );
+  assert.equal(
+    (await f.request("/reports?from=invalid&to=2026-01-01")).status,
+    400,
+  );
 });
-
-test("concurrent orders cannot oversell", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({ stock: 5 });
-  const results = await Promise.all(
-    [1, 2].map(() =>
-      client.request("/api/orders", {
-        method: "POST",
-        body: orderBody(product.id, 4),
-      }),
-    ),
-  );
-  assert.equal(results.filter((result) => result.ok).length, 1);
-  expectRejected(results.find((result) => !result.ok));
-  const state = await client.state();
-  assert.equal(state.products[0].stock, 1);
-  assert.equal(state.orders.length, 1);
-});
-
-test("cancellation restores stock once and completed orders cannot be cancelled", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({ stock: 10 });
-  assert.ok(
+test("category rename updates entries; used categories cannot be removed", async (t) => {
+  const f = await fixture(t);
+  const item = await entry(f);
+  const c = (await f.state()).entries.find(
+    (e) => e.id === item.body.id,
+  ).categoryId;
+  assert.equal(
     (
-      await client.request("/api/orders", {
-        method: "POST",
-        body: orderBody(product.id, 3),
+      await f.request("/categories/" + c, "PATCH", {
+        name: "Yeni gelir kategorisi",
+        color: "#123456",
       })
-    ).ok,
+    ).status,
+    200,
   );
-  const order = (await client.state()).orders[0];
-  assert.ok(
-    (
-      await client.request(`/api/orders/${order.id}`, {
-        method: "PATCH",
-        body: { status: "Hazır" },
-      })
-    ).ok,
-  );
-  assert.ok(
-    (
-      await client.request(`/api/orders/${order.id}`, {
-        method: "PATCH",
-        body: { status: "İptal" },
-      })
-    ).ok,
-  );
-  await client.request(`/api/orders/${order.id}`, {
-    method: "PATCH",
-    body: { status: "İptal" },
+  assert.equal((await f.state()).entries[0].category, "Yeni gelir kategorisi");
+  assert.equal((await f.request("/categories/" + c, "DELETE")).status, 409);
+  const extra = await f.request("/categories", "POST", {
+    type: "expense",
+    name: "Yeni kategori",
+    color: "#ab1234",
   });
-  assert.equal((await client.state()).products[0].stock, 10);
-  expectRejected(
-    await client.request(`/api/orders/${order.id}`, {
-      method: "PATCH",
-      body: { status: "Hazır" },
-    }),
-  );
-
-  assert.ok(
+  assert.equal(extra.status, 201);
+  assert.equal(
     (
-      await client.request("/api/orders", {
-        method: "POST",
-        body: orderBody(product.id, 2),
+      await f.request("/categories", "POST", {
+        type: "expense",
+        name: "Yeni kategori",
+        color: "#ab1234",
       })
-    ).ok,
+    ).status,
+    409,
   );
-  const nextOrder = (await client.state()).orders.find(
-    (item) => item.id !== order.id,
+  assert.equal(
+    (await f.request("/categories/" + extra.body.id, "DELETE")).status,
+    200,
   );
-  expectRejected(
-    await client.request(`/api/orders/${nextOrder.id}`, {
-      method: "PATCH",
-      body: { status: "Tamamlandı" },
-    }),
-  );
-  assert.ok(
-    (
-      await client.request(`/api/orders/${nextOrder.id}`, {
-        method: "PATCH",
-        body: { status: "Hazır" },
-      })
-    ).ok,
-  );
-  assert.ok(
-    (
-      await client.request(`/api/orders/${nextOrder.id}`, {
-        method: "PATCH",
-        body: { status: "Tamamlandı" },
-      })
-    ).ok,
-  );
-  expectRejected(
-    await client.request(`/api/orders/${nextOrder.id}`, {
-      method: "PATCH",
-      body: { status: "İptal" },
-    }),
-  );
-  assert.equal((await client.state()).products[0].stock, 8);
 });
-
-test("expenses validate real calendar dates and cent precision", async (t) => {
-  const client = await fixture(t);
-  const base = {
-    description: "Elektrik",
-    category: "Fatura",
-    amount: 123.46,
-    date: "2026-10-17",
-  };
-  const result = await client.request("/api/expenses", {
-    method: "POST",
-    body: base,
+test("JSON backup restores into a fresh account, preview is non-mutating and repeats skip duplicates", async (t) => {
+  const f = await fixture(t);
+  await entry(f, "income", { amount: 34.56 });
+  await entry(f, "expense", { amount: 12.34, status: "pending" });
+  const cat = (await f.state()).categories.find((c) => c.type === "income");
+  await f.request("/categories/" + cat.id, "PATCH", {
+    name: "Özel gelir",
+    color: "#123456",
   });
-  assert.ok(result.ok, JSON.stringify(result.data));
-  let state = await client.state();
-  assert.equal(state.expenses[0].amount, 123.46);
-  for (const overrides of [
-    { amount: -1 },
-    { amount: 0 },
-    { amount: "100" },
-    { amount: 123.456 },
-    { description: "" },
-    { date: "2026-02-30" },
-    { date: "2025-02-29" },
-    { date: "2026-13-01" },
-    { date: "17.10.2026" },
-  ]) {
-    expectRejected(
-      await client.request("/api/expenses", {
-        method: "POST",
-        body: { ...base, ...overrides },
-      }),
-    );
-  }
+  const backup = await f.request("/export");
+  assert.equal(backup.body.format, "komagene-finance");
+  assert.ok(backup.headers.get("content-disposition").includes(".json"));
+  assert.ok(!JSON.stringify(backup.body).includes("password"));
+  const target = await fixture(t);
+  const preview = await target.request("/import/preview", "POST", backup.body);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.body.added, 2);
+  assert.equal((await target.state()).entries.length, 0);
   assert.ok(
-    (
-      await client.request("/api/expenses", {
-        method: "POST",
-        body: { ...base, description: "Artık yıl", date: "2024-02-29" },
-      })
-    ).ok,
+    !(await target.state()).categories.some((c) => c.name === "Özel gelir"),
   );
-  state = await client.state();
-  assert.equal(state.expenses.length, 2);
-  assert.ok(
-    (
-      await client.request(`/api/expenses/${state.expenses[0].id}`, {
-        method: "DELETE",
-      })
-    ).ok,
+  assert.equal(
+    (await target.request("/import", "POST", backup.body)).status,
+    200,
   );
-  assert.equal((await client.state()).expenses.length, 1);
+  assert.equal((await target.state()).entries.length, 2);
+  assert.deepEqual(
+    (await target.request("/import", "POST", backup.body)).body,
+    { ok: true, added: 0, skipped: 2, categoriesAdded: 0 },
+  );
 });
-
-test("employee and branch updates validate fields and persist after restart", async (t) => {
-  const client = await fixture(t);
-  const employee = {
-    name: "Deniz",
-    role: "Kasiyer",
-    phone: "0555 000 00 00",
-    salary: 28000.25,
-  };
-  assert.ok(
-    (await client.request("/api/employees", { method: "POST", body: employee }))
-      .ok,
-  );
-  let state = await client.state();
-  const employeeId = state.employees[0].id;
-  assert.equal(state.employees[0].salary, 28000.25);
-  assert.equal(state.employees[0].active, true);
-  for (const salary of [-1, "28000", 28000.123]) {
-    expectRejected(
-      await client.request(`/api/employees/${employeeId}`, {
-        method: "PATCH",
-        body: { salary },
-      }),
-    );
-  }
-  expectRejected(
-    await client.request(`/api/employees/${employeeId}`, {
-      method: "PATCH",
-      body: { active: "false" },
-    }),
-  );
-  assert.ok(
+test("invalid or conflicting import is atomic and preserves existing entries", async (t) => {
+  const f = await fixture(t);
+  await entry(f);
+  const backup = (await f.request("/export")).body;
+  const copy = structuredClone(backup);
+  copy.entries.push({ ...copy.entries[0], id: randomUUID(), amount: 50 });
+  copy.entries.push({ ...copy.entries[0], id: randomUUID(), amount: -2 });
+  assert.equal((await f.request("/import", "POST", copy)).status, 400);
+  assert.equal((await f.state()).entries.length, 1);
+  backup.entries[0].amount = 200;
+  assert.equal((await f.request("/import", "POST", backup)).status, 409);
+  assert.equal((await f.state()).entries[0].amount, 100.25);
+  assert.equal(
     (
-      await client.request(`/api/employees/${employeeId}`, {
-        method: "PATCH",
-        body: { role: "Şube sorumlusu", salary: 32000.5, active: false },
+      await f.request("/import", "POST", {
+        format: "wrong",
+        version: 1,
+        categories: [],
+        entries: [],
       })
-    ).ok,
+    ).status,
+    400,
   );
-  expectRejected(
-    await client.request("/api/settings", {
-      method: "PATCH",
-      body: { branchName: "Kaydedilmemeli", ownerName: "" },
-    }),
-  );
-  assert.equal((await client.state()).settings.branchName, "Merkez Şube");
-  assert.ok(
-    (
-      await client.request("/api/settings", {
-        method: "PATCH",
-        body: { branchName: "Kadıköy Şubesi", ownerName: "Ahmet B." },
-      })
-    ).ok,
-  );
-  await client.stop();
-  await client.start();
-  assert.ok(
-    (
-      await client.request("/api/login", {
-        method: "POST",
-        body: { password: PASSWORD },
-      })
-    ).ok,
-  );
-  state = await client.state();
-  assert.equal(state.settings.branchName, "Kadıköy Şubesi");
-  assert.equal(state.settings.ownerName, "Ahmet B.");
-  assert.equal((await client.request("/api/auth")).data.user.name, "Ahmet B.");
-  assert.equal(state.employees[0].id, employeeId);
-  assert.equal(state.employees[0].role, "Şube sorumlusu");
-  assert.equal(state.employees[0].salary, 32000.5);
-  assert.equal(state.employees[0].active, false);
 });
-
-test("sample setup is explicitly marked and its stock movements reconcile", async (t) => {
-  const client = await fixture(t, { initialize: false });
-  assert.ok((await client.setup({ withDemo: true })).ok);
-  const state = await client.state();
-  assert.equal(state.settings.demoData, true);
-  for (const key of [
-    "products",
-    "orders",
-    "expenses",
-    "employees",
-    "movements",
-  ]) {
-    assert.ok(state[key].length > 0, `demo should include ${key}`);
-  }
-  for (const order of state.orders) assert.match(order.customer, /Örnek/i);
-  for (const employee of state.employees) assert.match(employee.name, /Örnek/i);
-  for (const expense of state.expenses)
-    assert.match(expense.description, /Örnek/i);
-  for (const product of state.products) {
-    const movementTotal = state.movements
-      .filter((movement) => movement.productId === product.id)
-      .reduce((total, movement) => total + movement.quantity, 0);
-    assert.equal(product.stock, movementTotal);
-    assert.ok(product.stock >= 0);
-  }
+test("password rotation invalidates other sessions and retains business records", async (t) => {
+  const f = await fixture(t);
+  await entry(f);
+  const original = (await f.request("/login", "POST", { password })).headers
+    .get("set-cookie")
+    .split(";")[0];
+  const next = randomBytes(18).toString("hex");
+  assert.equal(
+    (
+      await f.request("/password", "POST", {
+        currentPassword: "wrong",
+        newPassword: next,
+      })
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await f.request("/password", "POST", {
+        currentPassword: password,
+        newPassword: next,
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await f.request("/state", "GET", undefined, { cookie: original })).status,
+    401,
+  );
+  assert.equal((await f.state()).entries.length, 1);
+  await f.request("/logout", "POST");
+  assert.equal((await f.request("/login", "POST", { password })).status, 401);
+  assert.equal(
+    (await f.request("/login", "POST", { password: next })).status,
+    200,
+  );
 });
-
-test("owner credentials and business records persist after reopening the database", async (t) => {
-  const client = await fixture(t);
-  const product = await client.product({ name: "Kalıcı Dürüm", stock: 7 });
+test("settings and finances persist after database reopening", async (t) => {
+  const f = await fixture(t);
+  await entry(f, "expense", { amount: 456.78, notes: "Kalıcı not" });
+  await f.request("/settings", "PATCH", {
+    branchName: "Yeni Şube",
+    ownerName: "Yeni Yönetici",
+  });
+  await f.reopen();
+  const s = await f.state();
+  assert.equal(s.settings.branchName, "Yeni Şube");
+  assert.equal(s.entries[0].amount, 456.78);
+  assert.equal(s.entries[0].notes, "Kalıcı not");
+});
+test("sample data spans two years, is marked, and has no future settled transactions", async (t) => {
+  const f = await fixture(t, { demo: true });
+  const s = await f.state();
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Istanbul",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date());
+  assert.equal(s.settings.demoData, true);
+  assert.ok(s.entries.length > 20);
+  assert.ok(new Set(s.entries.map((e) => e.date.slice(0, 4))).size >= 2);
   assert.ok(
-    (
-      await client.request("/api/orders", {
-        method: "POST",
-        body: orderBody(product.id, 2),
-      })
-    ).ok,
+    s.entries.filter((e) => e.status === "paid").every((e) => e.date <= today),
   );
-  const before = await client.state();
-  await client.stop();
-  await client.start();
-  assert.equal((await client.request("/api/auth")).data.initialized, true);
-  assert.equal((await client.request("/api/state")).status, 401);
-  assert.equal((await client.setup()).status, 409);
-  assert.ok(
-    (
-      await client.request("/api/login", {
-        method: "POST",
-        body: { password: PASSWORD },
-      })
-    ).ok,
-  );
-  const after = await client.state();
-  assert.equal(after.products[0].id, product.id);
-  assert.equal(after.products[0].stock, 5);
-  assert.equal(after.orders[0].id, before.orders[0].id);
-  assert.equal(after.orders[0].total, 180);
+  assert.equal(s.entries.filter((e) => e.status === "pending").length, 2);
 });
